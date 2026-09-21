@@ -1,0 +1,67 @@
+# Normalize line endings across platforms.
+#
+# Critical: shell scripts must keep LF endings or the shebang breaks on the
+# macOS/Linux runners that execute them.
+
+* text=auto
+
+# Shell scripts: force LF on checkout.
+*.sh        text eol=lf
+*.bash      text eol=lf
+
+# CI / config
+*.yml       text eol=lf
+*.yaml      text eol=lf
+Dockerfile  text eol=lf
+*.dockerignore text eol=lf
+
+# PowerShell: keep CRLF for Windows tooling compatibility.
+*.ps1       text eol=crlf
+*.psm1      text eol=crlf
+*.psd1      text eol=crlf
+*.cmd       text eol=crlf
+*.bat       text eol=crlf
+
+# Swift / source
+*.swift     text
+*.m         text
+*.mm        text
+*.h         text
+*.c         text
+*.cpp       text
+*.py        text eol=lf
+*.js        text eol=lf
+*.mjs       text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.json      text eol=lf
+*.md        text
+
+# Xcode project files are plists and must round-trip exactly.
+*.pbxproj   text
+*.xcscheme  text
+*.plist     text
+
+# Binary assets: never touch.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.ico       binary
+*.pdf       binary
+*.zip       binary
+*.ipa       binary
+*.xcarchive binary
+*.car       binary
+*.p12       binary
+*.mobileprovision binary
+*.a         binary
+*.dylib     binary
+*.so        binary
+*.framework binary
+*.xcframework binary
+
+# Symbols and assets
+*.svg       text
+*.xcassets  text

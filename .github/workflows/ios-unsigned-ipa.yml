@@ -1,0 +1,190 @@
+name: iOS Unsigned IPA
+
+# Builds an UNSIGNED .ipa using a GitHub-hosted macOS runner.
+# No Apple Developer account, certificate, or provisioning profile is required.
+#
+# Trigger it from the Actions tab, or from the Windows side with:
+#   gh workflow run "iOS Unsigned IPA"
+#
+# The finished .ipa is attached to the run as the "ios-unsigned-ipa" artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: "Build configuration"
+        required: true
+        default: "Release"
+        type: choice
+        options: [Release, Debug]
+      version:
+        description: "Override MARKETING_VERSION (leave blank to use project value)"
+        required: false
+        default: ""
+        type: string
+      build_number:
+        description: "Override CURRENT_PROJECT_VERSION (leave blank to use project value)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipa:
+    name: Build unsigned IPA
+    # ios/Package.swift targets iOS 26.5 and the project needs the iOS 26.5 SDK.
+    # macos-26 is the runner image that ships Xcode 26.x.
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The Textual package is a local path dependency at ios/Packages/Textual.
+          # A full checkout is sufficient; submodules are not used.
+          fetch-depth: 1
+
+      - name: Show Xcode and SDK versions
+        run: |
+          xcodebuild -version
+          echo "--- available SDKs ---"
+          xcodebuild -showsdks || true
+          echo "--- iphoneos SDK ---"
+          xcrun --sdk iphoneos --show-sdk-version || true
+          echo "--- swift ---"
+          swift --version || true
+
+      - name: Select newest Xcode
+        run: |
+          # Prefer the newest Xcode present on the image, so the iOS 26.5 SDK
+          # is available regardless of which version is the default.
+          XCODE_APP="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n1)"
+          if [ -n "${XCODE_APP}" ]; then
+            echo "Using ${XCODE_APP}"
+            sudo xcode-select -s "${XCODE_APP}/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Resolve Swift package dependencies
+        working-directory: ios/Agents Anywhere
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "Agents Anywhere.xcodeproj" \
+            -scheme "Agents Anywhere" || true
+
+      - name: Build unsigned IPA
+        working-directory: ios
+        env:
+          CONFIGURATION: ${{ inputs.configuration }}
+          VERSION: ${{ inputs.version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build-unsigned-ipa.sh
+
+          ARGS=(-o "${GITHUB_WORKSPACE}/artifacts" -c "${CONFIGURATION}")
+          if [ -n "${VERSION}" ]; then
+            ARGS+=(-v "${VERSION}")
+          fi
+          if [ -n "${BUILD_NUMBER}" ]; then
+            ARGS+=(-b "${BUILD_NUMBER}")
+          fi
+
+          ./scripts/build-unsigned-ipa.sh "${ARGS[@]}"
+
+      - name: Verify IPA contents
+        run: |
+          set -euo pipefail
+
+          IPA="$(find "${GITHUB_WORKSPACE}/artifacts" -name '*.ipa' -type f | head -n1)"
+          if [ -z "${IPA}" ]; then
+            echo "::error::No .ipa produced"
+            exit 1
+          fi
+
+          echo "IPA: ${IPA}"
+          echo "--- archive listing (first 20 entries) ---"
+          unzip -l "${IPA}" | head -n 20
+
+          # An .ipa must have exactly one Payload/<Name>.app at its root.
+          if ! unzip -l "${IPA}" | grep -q "Payload/.*\.app/"; then
+            echo "::error::IPA does not contain a Payload/*.app directory"
+            exit 1
+          fi
+
+          echo "--- extracting for inspection ---"
+          rm -rf /tmp/ipa-check
+          mkdir -p /tmp/ipa-check
+          ( cd /tmp/ipa-check && unzip -q "${IPA}" )
+
+          APP="$(find /tmp/ipa-check/Payload -maxdepth 1 -name '*.app' -type d | head -n1)"
+          if [ -z "${APP}" ]; then
+            echo "::error::No .app bundle inside Payload/"
+            exit 1
+          fi
+          echo "App bundle: ${APP}"
+
+          # Read the real executable path from Info.plist rather than guessing.
+          EXEC_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${APP}/Info.plist" 2>/dev/null || basename "${APP}" .app)"
+          BIN="${APP}/${EXEC_NAME}"
+          echo "Executable: ${BIN}"
+
+          [[ -f "${BIN}" ]] || { echo "::error::Executable not found at ${BIN}"; exit 1; }
+
+          echo "--- binary architecture (must include arm64 for real devices) ---"
+          ARCHS="$(lipo -archs "${BIN}")"
+          echo "archs: ${ARCHS}"
+          file "${BIN}" || true
+
+          if ! echo "${ARCHS}" | grep -q "arm64"; then
+            echo "::error::Binary does not contain arm64; it cannot run on a real device."
+            exit 1
+          fi
+
+          echo "--- confirming binary is UNSIGNED ---"
+          # For an unsigned Mach-O, codesign reports an error or "code object is not
+          # signed at all". A signed binary reports an Authority or a CMS signature.
+          CODESIGN_OUT="$(codesign -dvvv "${BIN}" 2>&1 || true)"
+          echo "${CODESIGN_OUT}"
+
+          if echo "${CODESIGN_OUT}" | grep -qi "not signed at all"; then
+            echo "Confirmed: binary is not signed."
+          elif echo "${CODESIGN_OUT}" | grep -q "Authority="; then
+            echo "::warning::Binary carries a signing Authority; expected unsigned."
+          else
+            echo "Note: codesign produced no explicit signature; treating as unsigned."
+          fi
+
+          echo "--- Info.plist highlights ---"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Info.plist" || true
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Info.plist" || true
+          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "${APP}/Info.plist" || true
+
+      - name: Compute checksum
+        run: |
+          IPA="$(find "${GITHUB_WORKSPACE}/artifacts" -name '*.ipa' -type f | head -n1)"
+          shasum -a 256 "${IPA}" | tee "${GITHUB_WORKSPACE}/artifacts/SHA256SUMS.txt"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: |
+            artifacts/*.ipa
+            artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-logs
+          path: |
+            ~/Library/Developer/Xcode/DerivedData/**/*.xcactivitylog
+            /tmp/aa-ios-build.*/**
+          if-no-files-found: ignore
+          retention-days: 7
