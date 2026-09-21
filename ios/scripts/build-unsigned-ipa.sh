@@ -50,8 +50,12 @@ command -v xcrun     >/dev/null 2>&1 || die "xcrun not found. Install Xcode comm
 
 [[ -d "${PROJECT}" ]] || die "Xcode project not found at: ${PROJECT}"
 
-XCODE_VERSION="$(xcodebuild -version | head -n1 | awk '{print $2}')"
-log "Xcode ${XCODE_VERSION} detected"
+# NOTE: never pipe xcodebuild into `head`. Closing the pipe early makes
+# xcodebuild die with "NSFileHandleOperationException: Broken pipe" (exit 134)
+# on newer Xcode. Capture to a variable first, then slice it.
+XCODE_VERSION_FULL="$(xcodebuild -version 2>/dev/null || true)"
+XCODE_VERSION="$(printf '%s\n' "${XCODE_VERSION_FULL}" | awk 'NR==1{print $2}')"
+log "Xcode ${XCODE_VERSION:-unknown} detected"
 
 # The project targets iOS 26.5, which requires the iOS 26.5 SDK (Xcode 26.5+).
 IOS_SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")"
